@@ -1,0 +1,13 @@
+{
+  "name": "software-factory",
+  "version": "0.1.0",
+  "description": "Simple software factory. Inner/outer loops. LLM-written prompts. Build → review → fix until done.",
+  "type": "module",
+  "bin": {
+    "foundry": "./foundry.mjs"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  }
+}
