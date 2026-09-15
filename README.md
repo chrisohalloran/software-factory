@@ -6,24 +6,24 @@ Inspired by the [Ralph Wiggum loop](https://github.com/yy/wiggum) (fresh context
 
 ```text
 SPEC
-  |
-  v
-INITIALIZER -- features.json + progress.md
-  |
-  v
-+------------- OUTER LOOP (fresh each turn) --------------+
-|  1. Gather: spec, features, progress, files, review    |
-|  2. Prompt writer (planner model) drafts this turn     |
-|  3. Pick the next-best slice                           |
-|                                                        |
-|     +---- INNER LOOP -----------------------------+
-|     |  Builder model implements the slice         |
-|     |  Reviewer model (different) grades it       |
-|     |  Fixer patches  --> review again            |
-|     |  until pass or inner cap                    |
-|     +---------------------------------------------+
-|  4. Record progress, mark the slice, repeat            |
-+--------------------------------------------------------+
+  │
+  ▼
+INITIALIZER ──► features.json + progress.md
+  │
+  ▼
+┌──────────── OUTER LOOP (fresh each turn) ─────────────┐
+│  1. Gather: spec, features, progress, files, review   │
+│  2. Prompt writer (planner model) drafts this turn    │
+│  3. Pick the next-best slice                          │
+│                                                       │
+│     ┌──── INNER LOOP ──────────────────────────┐      │
+│     │  Builder model implements the slice      │      │
+│     │  Reviewer model (different) grades it    │      │
+│     │  Fixer patches  ──► review again         │      │
+│     │  until pass or inner cap                 │      │
+│     └──────────────────────────────────────────┘      │
+│  4. Record progress, mark the slice, repeat           │
+└───────────────────────────────────────────────────────┘
 ```
 
 ## CLI
@@ -59,7 +59,7 @@ On disk after a run:
 
 ## Why two loops
 
-Context windows rot. The **outer loop** is stateless: every turn rereads the spec, the feature list, file state, and the progress log, then decides the next bounded slice. The **inner loop** is a specialist fight: one model writes, a *different* model reviews, the writer fixes, until the slice’s acceptance is met.
+Context windows rot. The **outer loop** is stateless: every turn rereads the spec, the feature list, git-less file state, and the progress log, then decides the next bounded slice. The **inner loop** is a specialist fight: one model writes, a *different* model reviews, the writer fixes, until the slice’s acceptance is met.
 
 The prompt writer is the point. Static `PROMPT.md` files go stale. Here the planner model composes builder and reviewer prompts from the actual workspace, every turn.
 
