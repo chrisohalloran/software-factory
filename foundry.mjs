@@ -10,17 +10,90 @@
  *
  *   XAI_API_KEY=... node foundry.mjs ./spec.md --out ./workspace
  */
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
 const FALLBACK = "grok-4.5";
 const DEFAULTS = {
   planner: "grok-4.3",
   builder: "grok-build-0.1",
-  reviewer: "grok-4.5",
+  reviewer: "grok-4.6",
+  builderHarness: "grok-build",
+  reviewerHarness: "codex",
   maxOuter: 8,
   maxInner: 3,
 };
+
+function runCmd(bin, args, cwd) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(bin, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (d) => {
+      out += d;
+    });
+    child.stderr.on("data", (d) => {
+      err += d;
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code !== 0) reject(new Error((err || out || `${bin} exited ${code}`).slice(0, 400)));
+      else resolve(out);
+    });
+  });
+}
+
+async function hasBin(bin) {
+  try {
+    await runCmd("which", [bin], process.cwd());
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function collectWorkspace(root) {
+  const files = [];
+  async function walk(dir, prefix = "") {
+    let entries = [];
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (e.name === "node_modules" || e.name.startsWith(".")) continue;
+      const rel = prefix ? `${prefix}/${e.name}` : e.name;
+      if (e.isDirectory()) await walk(join(dir, e.name), rel);
+      else if (/\.(html|css|js|json|md|txt)$/.test(e.name)) {
+        files.push({ path: rel, content: await readFile(join(dir, e.name), "utf8") });
+      }
+    }
+  }
+  await walk(root);
+  return files.filter((f) => !["SPEC.md", "features.json", "progress.md", "builder.prompt.md", "reviewer.prompt.md"].includes(f.path));
+}
+
+async function tryHarnessCli(harness, prompt, cwd) {
+  if (harness === "codex" && (await hasBin("codex"))) {
+    await runCmd("codex", ["exec", "--ephemeral", prompt], cwd);
+    return collectWorkspace(cwd);
+  }
+  if (harness === "kimi" && (await hasBin("kimi"))) {
+    await runCmd("kimi", ["-p", prompt, "--quiet"], cwd);
+    return collectWorkspace(cwd);
+  }
+  if (harness === "deepseek" && (await hasBin("dsh"))) {
+    try {
+      await runCmd("dsh", ["run", prompt], cwd);
+    } catch {
+      await runCmd("dsh", ["-p", prompt], cwd);
+    }
+    return collectWorkspace(cwd);
+  }
+  return null;
+}
 
 function arg(flag, fallback) {
   const i = process.argv.indexOf(flag);
@@ -127,12 +200,20 @@ Usage:
   XAI_API_KEY=... node foundry.mjs <spec.md> --out ./workspace
 
 Options:
-  --planner MODEL     outer loop + prompt writer  (default ${DEFAULTS.planner})
-  --builder MODEL     implements / fixes          (default ${DEFAULTS.builder})
-  --reviewer MODEL    independent review          (default ${DEFAULTS.reviewer})
-  --max-outer N       (default ${DEFAULTS.maxOuter})
-  --max-inner N       (default ${DEFAULTS.maxInner})
-  --out DIR           workspace root
+  --planner MODEL              outer loop + prompt writer  (default ${DEFAULTS.planner})
+  --builder MODEL              API model for builder       (default ${DEFAULTS.builder})
+  --reviewer MODEL             API model for reviewer      (default ${DEFAULTS.reviewer})
+  --builder-harness NAME       grok-build | codex | kimi | deepseek
+  --reviewer-harness NAME      grok-build | codex | kimi | deepseek
+  --max-outer N                (default ${DEFAULTS.maxOuter})
+  --max-inner N                (default ${DEFAULTS.maxInner})
+  --out DIR                    workspace root
+
+Harness CLIs (used when installed, else xAI API protocol fallback):
+  codex exec --ephemeral
+  kimi -p --quiet
+  dsh run
+  grok-build-0.1 via xAI
 `);
     process.exit(0);
   }
@@ -144,6 +225,8 @@ Options:
     builder: arg("--builder", DEFAULTS.builder),
     reviewer: arg("--reviewer", DEFAULTS.reviewer),
   };
+  const builderHarness = arg("--builder-harness", DEFAULTS.builderHarness);
+  const reviewerHarness = arg("--reviewer-harness", DEFAULTS.reviewerHarness);
   const maxOuter = Number(arg("--max-outer", DEFAULTS.maxOuter));
   const maxInner = Number(arg("--max-inner", DEFAULTS.maxInner));
   const spec = await readFile(specPath, "utf8");
@@ -151,7 +234,9 @@ Options:
   await mkdir(outDir, { recursive: true });
   await writeFile(join(outDir, "SPEC.md"), spec);
 
-  console.log(`\nFoundry  planner=${models.planner}  builder=${models.builder}  reviewer=${models.reviewer}\n`);
+  console.log(
+    `\nFoundry  planner=${models.planner}  builder=${builderHarness}/${models.builder}  reviewer=${reviewerHarness}/${models.reviewer}\n`,
+  );
 
   const init = await chat({
     model: models.planner,
@@ -212,21 +297,37 @@ Do not write application code.`,
     console.log(`plan   ${feature.id}  ${feature.title}`);
     console.log(`       ${plan.rationale || plan.gatherSummary || ""}`);
 
-    const built = await chat({
-      model: models.builder,
-      maxTokens: 5000,
-      temperature: 0.25,
-      system: `Builder. Implement one slice. Output file blocks only.
-===FILE path=index.html===\n...\n===END FILE===\n===META===\n{"summary":"..."}`,
-      user: `${plan.builderPrompt}\n\nCURRENT FILES\n${tree(files, 8000)}`,
-    });
-    const produced = parseFiles(built.text);
-    if (!produced.files.length) throw new Error("Builder produced no files");
     const map = new Map(files.map((f) => [f.path, f]));
-    for (const f of produced.files) map.set(f.path, f);
-    files = [...map.values()];
-    await writeAll(outDir, files);
-    console.log(`build  ${produced.summary || produced.files.map((f) => f.path).join(", ")}`);
+    let usedCli = false;
+    try {
+      const fromCli = await tryHarnessCli(builderHarness, plan.builderPrompt, outDir);
+      if (fromCli && fromCli.length) {
+        for (const f of fromCli) map.set(f.path, f);
+        files = [...map.values()];
+        usedCli = true;
+        console.log(`build  ${builderHarness} CLI  ${fromCli.map((f) => f.path).join(", ")}`);
+      }
+    } catch (err) {
+      console.warn(`  ${builderHarness} CLI failed (${err.message}); falling back to API protocol`);
+    }
+    if (!usedCli) {
+      const built = await chat({
+        model: models.builder,
+        maxTokens: 5000,
+        temperature: 0.25,
+        system: `Builder (${builderHarness} protocol). Implement one slice. Output file blocks only.
+===FILE path=index.html===\n...\n===END FILE===\n===META===\n{"summary":"..."}`,
+        user: `${plan.builderPrompt}\n\nCURRENT FILES\n${tree(files, 8000)}`,
+      });
+      const produced = parseFiles(built.text);
+      if (!produced.files.length) throw new Error("Builder produced no files");
+      for (const f of produced.files) map.set(f.path, f);
+      files = [...map.values()];
+      await writeAll(outDir, files);
+      console.log(`build  ${builderHarness} API  ${produced.summary || produced.files.map((f) => f.path).join(", ")}`);
+    } else {
+      await writeAll(outDir, files);
+    }
 
     let passed = false;
     for (let inner = 1; inner <= maxInner; inner++) {
@@ -235,7 +336,7 @@ Do not write application code.`,
         json: true,
         maxTokens: 1200,
         temperature: 0.15,
-        system: `Reviewer. Different model wrote this. JSON:
+        system: `Reviewer (${reviewerHarness} protocol). Different harness wrote this. JSON:
 {"verdict":"pass"|"fail","score":1,"issues":[{"severity":"must"|"should","detail":"..."}],"summary":"..."}
 Fail on missing acceptance or broken HTML/JS.`,
         user: `${plan.reviewerPrompt}\n\nSLICE ${feature.title} — ${feature.acceptance}\n\nFILES\n${tree(files, 9000)}`,
