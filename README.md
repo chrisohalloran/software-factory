@@ -39,12 +39,27 @@ node foundry.mjs examples/pomodoro.md --out ./workspace
 
 ```text
 node foundry.mjs <spec.md> --out ./workspace
-  --planner  grok-4.3          outer loop + prompt writer
-  --builder  grok-build-0.1    implements / fixes
-  --reviewer grok-4.5          independent review
+  --planner           grok-4.3
+  --builder-harness   grok-build | codex | kimi | deepseek
+  --reviewer-harness  grok-build | codex | kimi | deepseek
+  --builder           grok-build-0.1     API fallback model
+  --reviewer          grok-4.6
   --max-outer 8
   --max-inner 3
 ```
+
+## Inner harnesses
+
+Foundry is the **outer** loop. Each inner slice is dispatched to a named harness. If the binary is on your `PATH`, Foundry shells out to it in the workspace. Otherwise it runs that harness's protocol through the xAI API.
+
+| Harness | Binary | Protocol |
+| --- | --- | --- |
+| Grok Build | (xAI API) | `grok-build-0.1` file-block patch |
+| Codex | `codex exec --ephemeral` | [openai/codex](https://github.com/openai/codex) |
+| Kimi Code | `kimi -p --quiet` | [MoonshotAI/kimi-code](https://github.com/MoonshotAI/kimi-code) |
+| DeepSeek | `dsh run` | [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) |
+
+Default: builder **Grok Build**, reviewer **Codex** (a different harness).
 
 On disk after a run:
 
@@ -59,7 +74,7 @@ On disk after a run:
 
 ## Why two loops
 
-Context windows rot. The **outer loop** is stateless: every turn rereads the spec, the feature list, git-less file state, and the progress log, then decides the next bounded slice. The **inner loop** is a specialist fight: one model writes, a *different* model reviews, the writer fixes, until the slice’s acceptance is met.
+Context windows rot. The **outer loop** is stateless: every turn rereads the spec, the feature list, git-less file state, and the progress log, then decides the next bounded slice. The **inner loop** is a specialist fight: one **harness** writes, a *different* harness reviews, the writer fixes, until the slice’s acceptance is met.
 
 The prompt writer is the point. Static `PROMPT.md` files go stale. Here the planner model composes builder and reviewer prompts from the actual workspace, every turn.
 
