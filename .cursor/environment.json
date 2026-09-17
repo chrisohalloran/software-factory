@@ -1,0 +1,8 @@
+{
+  "name": "software-factory",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "install": "bash .cursor/install.sh"
+}
